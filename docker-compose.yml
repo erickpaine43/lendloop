@@ -1,0 +1,84 @@
+# Infraestructura local de LendLoop: Convex (self-hosted) + n8n.
+#
+# Uso:
+#   cp infra/convex.env.example infra/convex.env   # y completa los valores
+#   cp infra/n8n.env.example infra/n8n.env         # y completa los valores
+#   docker compose up -d
+#
+#   Convex API ............ http://127.0.0.1:3210
+#   Convex HTTP actions ... http://127.0.0.1:3211
+#   Convex dashboard ...... http://127.0.0.1:6791
+#   n8n ................... http://127.0.0.1:5678
+#
+# Dentro de la red de Docker los servicios se llaman por nombre:
+#   n8n    -> Convex: http://convex-backend:3211
+#   Convex -> n8n:    http://n8n:5678/webhook/...
+# Todos los puertos se publican solo en 127.0.0.1 (no accesibles desde la red).
+
+services:
+  convex-backend:
+    image: ghcr.io/convex/convex-backend:3d585751a2de8c9066dc3fc5ac18340c1ef48810
+    restart: unless-stopped
+    stop_grace_period: 10s
+    stop_signal: SIGINT
+    ports:
+      - "127.0.0.1:3210:3210"
+      - "127.0.0.1:3211:3211"
+    env_file:
+      - ./infra/convex.env
+    environment:
+      - CONVEX_CLOUD_ORIGIN=http://127.0.0.1:3210
+      - CONVEX_SITE_ORIGIN=http://127.0.0.1:3211
+      - DISABLE_BEACON=true
+      - DISABLE_METRICS_ENDPOINT=true
+      - DOCUMENT_RETENTION_DELAY=172800
+      - RUST_LOG=info
+    volumes:
+      - convex_data:/convex/data
+    healthcheck:
+      test: curl -f http://localhost:3210/version
+      interval: 5s
+      start_period: 10s
+
+  convex-dashboard:
+    image: ghcr.io/convex/convex-dashboard:3d585751a2de8c9066dc3fc5ac18340c1ef48810
+    restart: unless-stopped
+    stop_grace_period: 10s
+    stop_signal: SIGINT
+    ports:
+      - "127.0.0.1:6791:6791"
+    environment:
+      - NEXT_PUBLIC_DEPLOYMENT_URL=http://127.0.0.1:3210
+    depends_on:
+      convex-backend:
+        condition: service_healthy
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.48.8
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5678:5678"
+    env_file:
+      - ./infra/n8n.env
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:5678/
+      - GENERIC_TIMEZONE=America/Bogota
+      - TZ=America/Bogota
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_PERSONALIZATION_ENABLED=false
+      # Los Code nodes leen los secretos HMAC con $env, así nunca quedan en el JSON exportado de los workflows.
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      # URL de las HTTP actions de Convex vista desde la red de Docker.
+      - CONVEX_SITE_URL=http://convex-backend:3211
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      convex-backend:
+        condition: service_healthy
+
+volumes:
+  convex_data:
+  n8n_data:

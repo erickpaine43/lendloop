@@ -6,7 +6,7 @@ A neighborhood tool-lending board: neighbors list tools they are willing to lend
 
 **Stack:** Next.js 16 (App Router) · Clerk (auth) · Convex (data + backend logic, self-hosted) · n8n (workflow automation, self-hosted) · TypeScript
 
-> **Status: work in progress.** The data model, authorization and backend functions are done and tested. The UI and the n8n workflows are next. See [Roadmap](#roadmap).
+> **Status: work in progress.** The data model, authorization, UI and n8n automations are done and tested. Remaining polish is listed in the [Roadmap](#roadmap).
 
 ---
 
@@ -117,7 +117,17 @@ npx convex env set CONVEX_TO_N8N_SECRET <same value as infra/n8n.env>
 npx convex env set N8N_TO_CONVEX_SECRET <same value as infra/n8n.env>
 ```
 
-### 6. Run the app
+### 6. Import the n8n workflows
+
+```bash
+npm run n8n:import
+```
+
+This imports the three workflows in [`n8n/`](n8n/) into the n8n container and publishes them. The workflows read the HMAC secrets and the Convex URL from environment variables (`$env`), so no credentials need to be configured in n8n.
+
+To see the workflows in the n8n editor, open http://127.0.0.1:5678 and create the owner account on first visit.
+
+### 7. Run the app
 
 In one terminal, push the Convex functions and watch for changes:
 
@@ -133,7 +143,7 @@ npm run dev
 
 Open http://localhost:3000 and sign in. On first sign-in the app registers the user in Convex with the `user` role.
 
-### 7. Make yourself an admin (optional)
+### 8. Make yourself an admin (optional)
 
 Roles can only be changed from the server, never from the browser. Find your user ID in the Convex dashboard (`users` table), then run:
 
@@ -190,6 +200,65 @@ These rules were tested with three simulated users (owner, borrower and admin), 
 
 ---
 
+## Automations (n8n)
+
+Three workflows live in [`n8n/`](n8n/) as exported JSON.
+
+### 1. Loan event notification
+
+```
+loans.request / decide / markReturned
+        │  (scheduled in the same transaction, so it only fires if the change commits)
+        ▼
+Convex action notifyLoanEvent ──HMAC──▶ n8n webhook /lendloop-loan-event
+                                            │ verify signature + timestamp
+                                            ├─ invalid → 401
+                                            └─ valid   → 202, notify recipient (mock: logged)
+                                                          │
+Convex /n8n/automation-events ◀──HMAC── signed write-back (status "sent")
+```
+
+- **Who gets notified:** the lender on `loan.requested`, and the borrower on `loan.approved`, `loan.declined` and `loan.returned`.
+- **The payload is minimal:** event, loan ID, tool name, dates, the recipient's display name and Clerk user ID, and a message. No emails. To send a real email, n8n would look up the address in Clerk by user ID, so Convex never has to store it.
+- **If n8n is down,** Convex retries twice with growing delays (10 s, then 40 s). After the last failure it records a `failed` event, so failures are never silent.
+
+### 2. Daily overdue reminders
+
+```
+Schedule (09:00 America/Bogota) ──HMAC──▶ Convex /n8n/overdue-loans
+                                             returns approved loans past their end date
+                                             that have not been reminded today
+        one item per loan → send reminder (mock: logged) → signed write-back
+```
+
+The idempotency key is `overdue:<loanId>:<date>`. If the workflow runs twice on the same day (a retry or a manual run), the second run finds nothing to send, and Convex ignores a duplicate write-back.
+
+### 3. Error handler
+
+Both workflows set it as their `errorWorkflow`. When a run fails (for example, after the HTTP node exhausts its 3 retries), it logs the workflow, the failed node, the error and the execution link. This is where a Slack or email alert would go in production.
+
+### Signing protocol (both directions)
+
+```
+Body:    {"payload": "<JSON as a string>"}
+Headers: X-LendLoop-Timestamp: <unix seconds>
+         X-LendLoop-Signature: hex(HMAC-SHA256(secret, "<timestamp>.<payload>"))
+```
+
+- **The payload travels as a string,** so both sides sign exactly the same bytes, no matter how each one re-serializes JSON.
+- **The receiver rejects** a missing or invalid signature and any timestamp more than 5 minutes off (replay protection). Signatures are compared in constant time.
+- **Each direction has its own secret:** `CONVEX_TO_N8N_SECRET` and `N8N_TO_CONVEX_SECRET`.
+- **n8n Code nodes are limited** to the `crypto` built-in module (`NODE_FUNCTION_ALLOW_BUILTIN=crypto`). They read secrets with `$env`, so the exported workflow JSON never contains a secret.
+
+### What was tested
+
+- **The Convex endpoints** reject requests with no signature, a wrong secret, a tampered payload or a stale timestamp. Valid requests succeed, and a repeated write-back returns `duplicate: true`.
+- **End to end:** Convex → n8n → write-back to Convex, plus a repeated event that does not create a second record.
+- **Overdue reminders:** a seeded overdue loan gets exactly one reminder across two runs.
+- **Failure handling:** with Convex unreachable, the error workflow runs. With n8n stopped, Convex retries and records a `failed` event.
+
+---
+
 ## Security and data-minimization decisions
 
 - **Authorization lives in Convex, not in the UI.** Hiding a button is never the only protection.
@@ -201,7 +270,8 @@ These rules were tested with three simulated users (owner, borrower and admin), 
 - **Roles are server-controlled.** New users always start as `user`, and `setRole` is internal.
 - **Input validation.** Text is trimmed and length-limited. Categories and conditions are fixed enums. Dates must be valid `YYYY-MM-DD`, start no earlier than yesterday in UTC (to tolerate time zones behind UTC), and span at most 60 days.
 - **Secrets stay out of the code.** They live in git-ignored `.env.local` and `infra/*.env` files and in Convex environment variables. Only `*.env.example` templates are committed.
-- **Two HMAC secrets**, one per direction (Convex → n8n and n8n → Convex), so a leak in one direction does not compromise the other.
+- **Signed integration.** Every Convex ↔ n8n call is HMAC-signed, has a timestamp, and is checked against replays (see [Signing protocol](#signing-protocol-both-directions)). There are two secrets, one per direction, so a leak in one direction does not compromise the other.
+- **Data minimization in automations.** n8n receives only display names and Clerk user IDs, never emails. Write-backs are validated with zod before anything is stored.
 - **Local-only ports.** Every Docker service is published on `127.0.0.1`.
 - **Pinned versions.** The Docker images (Convex and n8n) use fixed versions instead of `latest`.
 
@@ -216,12 +286,18 @@ convex/
   lib/auth.ts        requireUser / requireAdmin
   lib/dates.ts       Date validation and overlap checks
   lib/text.ts        Text sanitizing
+  lib/hmac.ts        HMAC signing and verification for n8n
   users.ts           Registration, roles, Trusted Lender
   tools.ts           Listings
   loans.ts           Borrow requests and loans
+  automations.ts     Notifications to n8n, overdue query, idempotent event log
+  http.ts            Signed HTTP endpoints called by n8n
 src/
   proxy.ts           Clerk middleware (Next.js 16 "proxy")
-  app/               Next.js App Router (UI in progress)
+  app/               Pages: public, tools, my-listings, my-requests, incoming, admin
+  components/        Shared UI, header, auth guard, forms
+n8n/                 Exported workflows (no secrets)
+scripts/             n8n-import.sh
 infra/               Env templates for the Docker services
 docker-compose.yml   Convex backend + dashboard + n8n
 ```
@@ -232,17 +308,17 @@ docker-compose.yml   Convex backend + dashboard + n8n
 
 - [x] Infrastructure: self-hosted Convex and n8n in Docker, Clerk ↔ Convex auth
 - [x] Data model, role-based access control and validation in Convex
-- [ ] UI
-  - [ ] Public page
-  - [ ] Catalog with category filter
-  - [ ] My listings, My requests and Incoming requests
-  - [ ] Admin panel
-- [ ] n8n workflows
-  - [ ] Request notifications
-  - [ ] Daily overdue reminders
-  - [ ] HMAC signing in both directions
-  - [ ] Idempotent write-backs
-  - [ ] Error workflow
+- [x] UI
+  - [x] Public page
+  - [x] Catalog with category filter
+  - [x] My listings, My requests and Incoming requests
+  - [x] Admin panel
+- [x] n8n workflows
+  - [x] Request notifications
+  - [x] Daily overdue reminders
+  - [x] HMAC signing in both directions
+  - [x] Idempotent write-backs
+  - [x] Error workflow
 - [ ] Recent automation activity on each loan
 - [ ] Automated permission tests
 - [ ] Notes on what I would change for production

@@ -3,7 +3,7 @@
 import { useUser } from "@clerk/nextjs";
 import { useConvexAuth, useMutation } from "convex/react";
 import { useEffect } from "react";
-import { api } from "../../convex/_generated/api";
+import { api } from "@convex/_generated/api";
 
 /**
  * Registra en Convex al usuario de la sesión cuando inicia sesión.

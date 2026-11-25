@@ -20,10 +20,10 @@ A neighborhood tool-lending board: neighbors list tools they are willing to lend
      │ sign-in                   │ queries / mutations
      ▼                           │ (Clerk session token)
 ┌──────────┐                     ▼
-│  Clerk   │  token issuer  ┌──────────────────────────────────────── Docker network ─┐
+│  Clerk   │  token issuer  ┌──────────────────────────────────────────── Docker network ─┐
 │  (SaaS)  │───────────────▶│  convex-backend :3210 / :3211   ◀──── HMAC ────▶  n8n :5678 │
-└──────────┘   validated by │  convex-dashboard :6791                                   │
-               Convex       └───────────────────────────────────────────────────────────┘
+└──────────┘   validated by │  convex-dashboard :6791                                     │
+               Convex       └─────────────────────────────────────────────────────────────┘
 ```
 
 - **Next.js** renders the UI. It does no authorization of its own: `src/proxy.ts` only attaches the Clerk session to the request.

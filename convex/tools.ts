@@ -50,6 +50,11 @@ export const list = query({
     const me = await requireUser(ctx);
     const today = todayUTC();
     const tools = await activeTools(ctx, args.category);
+    const myLoans = await ctx.db
+      .query("loans")
+      .withIndex("by_borrower", (q) => q.eq("borrowerId", me._id))
+      .collect();
+    const pendingToolIds = new Set(myLoans.filter((l) => l.status === "pending").map((l) => l.toolId));
     return await Promise.all(
       tools.map(async (tool) => {
         const owner = await ctx.db.get(tool.ownerId);
@@ -61,6 +66,8 @@ export const list = query({
           description: tool.description,
           available: !(await isOnLoan(ctx, tool._id, today)),
           isMine: tool.ownerId === me._id,
+          // Ya tengo una solicitud pendiente para esta herramienta.
+          requestPending: pendingToolIds.has(tool._id),
           // Del dueño solo se muestra lo necesario para decidir si pedir prestado.
           owner: owner ? { name: owner.name, trustedLender: owner.trustedLender } : null,
         };

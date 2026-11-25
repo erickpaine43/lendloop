@@ -1,8 +1,19 @@
-import { clerkMiddleware } from "@clerk/nextjs/server";
+import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
 // Next.js 16: "proxy" es el nuevo nombre de middleware.
-// Clerk solo adjunta la sesión a la request; la autorización real se hace en las funciones de Convex.
-export default clerkMiddleware();
+// Redirige a iniciar sesión en las páginas privadas. Es un chequeo optimista de UX:
+// la autorización real se hace en cada función de Convex.
+const isPrivateRoute = createRouteMatcher([
+  "/tools(.*)",
+  "/my-listings(.*)",
+  "/my-requests(.*)",
+  "/incoming(.*)",
+  "/admin(.*)",
+]);
+
+export default clerkMiddleware(async (auth, req) => {
+  if (isPrivateRoute(req)) await auth.protect();
+});
 
 export const config = {
   matcher: [

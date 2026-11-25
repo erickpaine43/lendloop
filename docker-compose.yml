@@ -71,6 +71,8 @@ services:
       - N8N_PERSONALIZATION_ENABLED=false
       # Los Code nodes leen los secretos HMAC con $env, así nunca quedan en el JSON exportado de los workflows.
       - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      # Permite usar solo el módulo `crypto` en los Code nodes (firma y verificación HMAC).
+      - NODE_FUNCTION_ALLOW_BUILTIN=crypto
       # URL de las HTTP actions de Convex vista desde la red de Docker.
       - CONVEX_SITE_URL=http://convex-backend:3211
     volumes:

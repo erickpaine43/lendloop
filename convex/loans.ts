@@ -1,4 +1,5 @@
 import { ConvexError, v } from "convex/values";
+import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { requireAdmin, requireUser } from "./lib/auth";
@@ -61,7 +62,7 @@ export const request = mutation({
       throw new ConvexError("You already have a pending request for this tool");
     }
 
-    return await ctx.db.insert("loans", {
+    const loanId = await ctx.db.insert("loans", {
       toolId: tool._id,
       borrowerId: me._id,
       lenderId: tool.ownerId,
@@ -69,6 +70,12 @@ export const request = mutation({
       endDate: args.endDate,
       status: "pending",
     });
+    // Se programa dentro de la misma transacción: solo se envía si el insert se confirma.
+    await ctx.scheduler.runAfter(0, internal.automations.notifyLoanEvent, {
+      loanId,
+      event: "loan.requested",
+    });
+    return loanId;
   },
 });
 
@@ -93,6 +100,10 @@ export const decide = mutation({
       status: args.approve ? "approved" : "declined",
       decidedAt: Date.now(),
     });
+    await ctx.scheduler.runAfter(0, internal.automations.notifyLoanEvent, {
+      loanId: loan._id,
+      event: args.approve ? "loan.approved" : "loan.declined",
+    });
   },
 });
 
@@ -106,6 +117,10 @@ export const markReturned = mutation({
     if (loan.lenderId !== me._id) throw new ConvexError("Forbidden");
     if (loan.status !== "approved") throw new ConvexError("Only approved loans can be returned");
     await ctx.db.patch(loan._id, { status: "returned", returnedAt: Date.now() });
+    await ctx.scheduler.runAfter(0, internal.automations.notifyLoanEvent, {
+      loanId: loan._id,
+      event: "loan.returned",
+    });
   },
 });
 

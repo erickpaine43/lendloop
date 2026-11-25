@@ -6,7 +6,7 @@ A neighborhood tool-lending board: neighbors list tools they are willing to lend
 
 **Stack:** Next.js 16 (App Router) · Clerk (auth) · Convex (data + backend logic, self-hosted) · n8n (workflow automation, self-hosted) · TypeScript
 
-> **Status: work in progress.** The data model, authorization, UI and n8n automations are done and tested. Remaining polish is listed in the [Roadmap](#roadmap).
+> **Status:** all features are done and covered by automated tests. See [What I would change for production](#what-i-would-change-for-production).
 
 ---
 
@@ -196,7 +196,7 @@ Every private function starts with `requireUser(ctx)` or `requireAdmin(ctx)` fro
 | `users.list` / `users.setTrustedLender` | Admin | Moderation |
 | `users.setRole` | **Server / CLI only** | `internalMutation`: it cannot be called from the browser, so nobody can promote themselves |
 
-These rules were tested with three simulated users (owner, borrower and admin), covering both the allowed and the forbidden paths.
+These rules are covered by automated tests (see [Tests](#tests)).
 
 ---
 
@@ -250,12 +250,36 @@ Headers: X-LendLoop-Timestamp: <unix seconds>
 - **Each direction has its own secret:** `CONVEX_TO_N8N_SECRET` and `N8N_TO_CONVEX_SECRET`.
 - **n8n Code nodes are limited** to the `crypto` built-in module (`NODE_FUNCTION_ALLOW_BUILTIN=crypto`). They read secrets with `$env`, so the exported workflow JSON never contains a secret.
 
-### What was tested
+### Recent activity on each loan
 
-- **The Convex endpoints** reject requests with no signature, a wrong secret, a tampered payload or a stale timestamp. Valid requests succeed, and a repeated write-back returns `duplicate: true`.
-- **End to end:** Convex → n8n → write-back to Convex, plus a repeated event that does not create a second record.
-- **Overdue reminders:** a seeded overdue loan gets exactly one reminder across two runs.
-- **Failure handling:** with Convex unreachable, the error workflow runs. With n8n stopped, Convex retries and records a `failed` event.
+Every loan view (My requests, Incoming requests, Admin) shows its latest automation events, for example "Notification sent 5 minutes ago", "Reminder sent 2 days ago" or "Notification failed 1 hour ago". Only the type, status and time reach the browser; the internal `detail` text stays in Convex.
+
+### Manually verified against the running stack
+
+These complement the automated tests:
+
+- **End to end:** Convex → n8n → write-back to Convex. A repeated event does not create a second record.
+- **Overdue reminders:** a seeded overdue loan gets exactly one reminder across two workflow runs.
+- **Failure handling:** with Convex unreachable, the n8n error workflow runs. With n8n stopped, Convex retries and records a `failed` event.
+
+---
+
+## Tests
+
+```bash
+npm test
+```
+
+21 tests run with [Vitest](https://vitest.dev) and [`convex-test`](https://docs.convex.dev/testing/convex-test), an in-memory Convex backend. They need no Docker, no Clerk and no network.
+
+| File | What it covers |
+|---|---|
+| [`convex/permissions.test.ts`](convex/permissions.test.ts) | Public data minimization, owner-only edits, admin moderation, the full loan flow, invalid requests (own tool, past dates, reversed range, more than 60 days, invalid date, duplicate request), lender-only decisions, overlap blocking, per-user loan visibility, and `setRole` being internal |
+| [`convex/automations.test.ts`](convex/automations.test.ts) | Date rules; HMAC endpoints (missing, wrong, tampered and stale signatures); overdue loans listed once per day; idempotent write-backs; payload validation; notifications scheduled on every loan change; a signed and minimal payload sent to the right person; retry exhaustion recorded as `failed`; recent activity without internal details |
+
+To check that the tests catch real bugs, the signature check and the admin check were disabled one at a time. The matching tests failed, and passed again once the code was restored.
+
+Test files have more than one dot in their name (`*.test.ts`, `test.setup.ts`), so the Convex CLI does not deploy them.
 
 ---
 
@@ -292,6 +316,7 @@ convex/
   loans.ts           Borrow requests and loans
   automations.ts     Notifications to n8n, overdue query, idempotent event log
   http.ts            Signed HTTP endpoints called by n8n
+  *.test.ts          Automated tests (convex-test + Vitest)
 src/
   proxy.ts           Clerk middleware (Next.js 16 "proxy")
   app/               Pages: public, tools, my-listings, my-requests, incoming, admin
@@ -301,6 +326,31 @@ scripts/             n8n-import.sh
 infra/               Env templates for the Docker services
 docker-compose.yml   Convex backend + dashboard + n8n
 ```
+
+---
+
+## What I would change for production
+
+**Notifications**
+- Send real emails from n8n (for example with Resend or SendGrid). Look up the address through the Clerk Backend API by `clerkUserId`, with the Clerk key stored as an n8n credential, so Convex still never stores emails.
+- Before sending, have n8n check the idempotency key with Convex. Today a Convex retry after n8n has already accepted an event could send a notification twice. The write-back is idempotent, but the notification itself is not.
+- Send reminders at each user's local time instead of a single 09:00 America/Bogota run.
+
+**Infrastructure**
+- Use Convex Cloud, or self-hosted Convex on Postgres with backups. Run n8n on Postgres in queue mode with workers.
+- Put everything behind HTTPS and a reverse proxy. Only the n8n webhook path should be publicly reachable.
+- Use a production Clerk instance with bot protection, and create the first admin with a one-off script.
+
+**Security**
+- Rotate secrets with key IDs, so two secrets can be valid during a rotation window.
+- Add a replay cache (remember signatures seen within the 5-minute window) on top of the timestamp check.
+- Rate-limit mutations such as `loans.request` and `tools.create`, for example with the Convex rate-limiter component.
+
+**Scale and operations**
+- Paginate the catalog and the loan lists. They currently read up to 500 rows.
+- Send Convex logs to a log stream. Have the n8n error workflow alert on Slack or PagerDuty. Add Sentry to the frontend.
+- Delete old `automationEvents` after a retention period.
+- Add end-to-end UI tests with Playwright for the main flows, and run lint, tests and build in CI on every pull request.
 
 ---
 
@@ -319,6 +369,6 @@ docker-compose.yml   Convex backend + dashboard + n8n
   - [x] HMAC signing in both directions
   - [x] Idempotent write-backs
   - [x] Error workflow
-- [ ] Recent automation activity on each loan
-- [ ] Automated permission tests
-- [ ] Notes on what I would change for production
+- [x] Recent automation activity on each loan
+- [x] Automated tests for permissions and automations
+- [x] Notes on what I would change for production

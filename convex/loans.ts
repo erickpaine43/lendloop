@@ -23,10 +23,15 @@ async function hasApprovedOverlap(
 
 /** Vista de un préstamo con solo los datos que cada parte necesita. */
 async function describe(ctx: QueryCtx, loan: Doc<"loans">) {
-  const [tool, borrower, lender] = await Promise.all([
+  const [tool, borrower, lender, events] = await Promise.all([
     ctx.db.get(loan.toolId),
     ctx.db.get(loan.borrowerId),
     ctx.db.get(loan.lenderId),
+    ctx.db
+      .query("automationEvents")
+      .withIndex("by_loan", (q) => q.eq("loanId", loan._id))
+      .order("desc")
+      .take(3),
   ]);
   return {
     _id: loan._id,
@@ -38,6 +43,8 @@ async function describe(ctx: QueryCtx, loan: Doc<"loans">) {
     tool: tool ? { _id: tool._id, name: tool.name, category: tool.category } : null,
     borrower: borrower ? { name: borrower.name } : null,
     lender: lender ? { name: lender.name, trustedLender: lender.trustedLender } : null,
+    // Actividad reciente de las automatizaciones de n8n (sin el detalle interno).
+    activity: events.map((e) => ({ type: e.type, status: e.status, at: e._creationTime })),
   };
 }
 
